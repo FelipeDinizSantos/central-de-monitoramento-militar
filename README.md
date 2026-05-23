@@ -229,6 +229,4 @@ broker.hivemq.com
 
 ---
 
-# Autor
-
 Projeto com fins acadêmicos. 
