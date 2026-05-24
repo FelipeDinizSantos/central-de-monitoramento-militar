@@ -7,7 +7,7 @@
 #include <HTTPClient.h>
 
 // API LARAVEL URL
-const char* API_URL = "http://192.168.15.6:8000/api/registros-acesso";
+const char* API_URL = "https://laravel-api-production-ebab.up.railway.app/api/registros-acesso";
 
 // WIFI 
 const char* WIFI_SSID = "ARYA-DEUSA";
