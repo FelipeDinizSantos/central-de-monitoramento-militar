@@ -205,11 +205,19 @@ void sendPhotoToAPI(camera_fb_t* fb)
   Serial.print("Tamanho imagem: ");
   Serial.println(fb->len);
 
+  Serial.print("Conectado WiFi: ");
+  Serial.println(WiFi.status() == WL_CONNECTED);
+
+  Serial.print("Gateway: ");
+  Serial.println(WiFi.gatewayIP());
+
+  Serial.print("API URL: ");
+  Serial.println(API_URL);
   int responseCode = http.POST(fb->buf, fb->len);
 
   Serial.print("HTTP Response: ");
   Serial.println(responseCode);
-
+  
   if (responseCode > 0)
   {
     String response = http.getString();
@@ -223,6 +231,9 @@ void sendPhotoToAPI(camera_fb_t* fb)
   }
 
   http.end();
+
+  Serial.print("ESP IP: ");
+  Serial.println(WiFi.localIP());
 }
 
 // FOTO 

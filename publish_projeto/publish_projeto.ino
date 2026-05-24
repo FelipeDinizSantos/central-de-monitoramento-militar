@@ -1,348 +1,266 @@
-#include "WiFi.h"
-#include "PubSubClient.h"
-#include "esp_camera.h"
-#include "FS.h"
-#include "SD_MMC.h"
-#include "time.h"
+#include <SPI.h>
+#include <RF24.h>
+#include <WiFiEsp.h>
+#include <PubSubClient.h>
+#include <SoftwareSerial.h>
 
-// WIFI 
-const char* WIFI_SSID = "Wokwi-GUEST";
-const char* WIFI_PASSWORD = "";
+// -------------------- SENSOR --------------------
+const int TRIGGER_PIN = 4;
+const int ECHO_PIN = 5;
+const int BUZZER_PIN = 10;
 
-//  MQTT 
+// -------------------- NRF24 --------------------
+const int CE_PIN = 7;
+const int CSN_PIN = 8;
+
+RF24 radio(CE_PIN, CSN_PIN);
+
+// -------------------- WIFI --------------------
+char SSID[] = "ARYA-DEUSA";
+char PASSWORD[] = "felipeBom123";
+
+// RX, TX
+SoftwareSerial espSerial(2, 3);
+
+WiFiEspClient wifiClient;
+PubSubClient mqttClient(wifiClient);
+
+// -------------------- MQTT --------------------
 const char* MQTT_BROKER = "broker.hivemq.com";
 const int MQTT_PORT = 1883;
 
-const char* MQTT_TOPIC = "felipe-diniz/projeto/exercito/sensor-distancia";
-String clientId = "esp32cam_" + String((uint32_t)ESP.getEfuseMac(), HEX);
+const char* MQTT_TOPIC =
+  "felipe-diniz/projeto/exercito/sensor-distancia";
 
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
+// -------------------- CONFIGURAÇÕES --------------------
+const int DIST_MAX = 300;
+const int DIST_MED = 200;
+const int DIST_NEAR = 100;
+const int DIST_VERY_NEAR = 20;
 
-// NTP 
-const char* NTP_SERVER = "pool.ntp.org";
+// Intervalo aumentado para maior estabilidade
+const unsigned long SENSOR_INTERVAL = 500;
 
-const long GMT_OFFSET_SEC = -3 * 3600;
-const int DAYLIGHT_OFFSET_SEC = 0;
+// -------------------- ESTADO --------------------
+double distanceCm = 0;
 
-unsigned long lastReconnectAttempt = 0;
-unsigned long lastPhotoTime = 0;
+unsigned long lastSensorRead = 0;
 
-const unsigned long PHOTO_COOLDOWN = 10000;
+bool veryNearSent = false;
 
-// CAMERA PINS (AI THINKER) 
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
+// -------------------- ULTRASSÔNICO --------------------
+long readUltrasonic()
+{
+  digitalWrite(TRIGGER_PIN, LOW);
 
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
+  delayMicroseconds(2);
 
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
+  digitalWrite(TRIGGER_PIN, HIGH);
 
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
+  delayMicroseconds(10);
 
-// WIFI 
+  digitalWrite(TRIGGER_PIN, LOW);
+
+  return pulseIn(ECHO_PIN, HIGH, 30000);
+}
+
+double getDistanceCm()
+{
+  long duration = readUltrasonic();
+
+  if (duration == 0)
+  {
+    return -1;
+  }
+
+  return duration * 0.01723;
+}
+
+// -------------------- WIFI --------------------
 void connectWiFi()
 {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  Serial.print("Conectando WiFi");
+  Serial.println("Conectando WiFi...");
 
   while (WiFi.status() != WL_CONNECTED)
   {
-    delay(500);
-    Serial.print(".");
+    Serial.println("Tentando conectar...");
+
+    WiFi.begin(SSID, PASSWORD);
+
+    delay(10000);
   }
 
-  Serial.println();
   Serial.println("WiFi conectado");
+
+  Serial.print("IP: ");
+
   Serial.println(WiFi.localIP());
 }
 
-// DATA/HORA 
-void setupTime()
+// -------------------- MQTT --------------------
+void connectMQTT()
 {
-  configTime(
-    GMT_OFFSET_SEC,
-    DAYLIGHT_OFFSET_SEC,
-    NTP_SERVER
-  );
-
-  struct tm timeinfo;
-
-  Serial.print("Sincronizando horario");
-
-  while (!getLocalTime(&timeinfo))
+  while (!mqttClient.connected())
   {
-    Serial.print(".");
-    delay(500);
-  }
+    Serial.println("Conectando MQTT...");
 
-  Serial.println();
-  Serial.println("Horario sincronizado");
+    if (mqttClient.connect("arduino-uno-sensor"))
+    {
+      Serial.println("MQTT conectado");
+    }
+    else
+    {
+      Serial.print("Erro MQTT: ");
+
+      Serial.println(mqttClient.state());
+
+      delay(3000);
+    }
+  }
 }
 
-String getTimestamp()
+void publishVeryNear(double cm)
 {
-  struct tm timeinfo;
+  char payload[64];
 
-  if (!getLocalTime(&timeinfo))
-  {
-    return "sem_horario";
-  }
-
-  char buffer[40];
-
-  strftime(
-    buffer,
-    sizeof(buffer),
-    "%Y%m%d_%H%M%S",
-    &timeinfo
+  snprintf(
+    payload,
+    sizeof(payload),
+    "ALERTA: objeto muito proximo - %.2f cm",
+    cm
   );
 
-  return String(buffer);
-}
+  bool ok = mqttClient.publish(MQTT_TOPIC, payload);
 
-// CAMERA 
-bool initCamera()
-{
-  camera_config_t config;
+  // Pequeno delay para estabilidade do ESP8266
+  delay(100);
 
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
-
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-
-  config.xclk_freq_hz = 20000000;
-
-  config.pixel_format = PIXFORMAT_JPEG;
-
-  if (psramFound())
+  if (ok)
   {
-    config.frame_size = FRAMESIZE_UXGA;
-    config.jpeg_quality = 10;
-    config.fb_count = 2;
+    Serial.println("Evento MQTT enviado");
   }
   else
   {
-    config.frame_size = FRAMESIZE_SVGA;
-    config.jpeg_quality = 12;
-    config.fb_count = 1;
+    Serial.println("Falha ao publicar MQTT");
   }
-
-  esp_err_t err = esp_camera_init(&config);
-
-  if (err != ESP_OK)
-  {
-    Serial.printf("Erro camera: 0x%x\n", err);
-    return false;
-  }
-
-  return true;
 }
 
-// SD 
-bool initSD()
+// -------------------- BUZZER --------------------
+void beepOnce()
 {
-  if (!SD_MMC.begin())
-  {
-    Serial.println("Erro ao iniciar SD");
-    return false;
-  }
+  tone(BUZZER_PIN, 2200);
 
-  uint8_t cardType = SD_MMC.cardType();
+  delay(150);
 
-  if (cardType == CARD_NONE)
-  {
-    Serial.println("Nenhum SD encontrado");
-    return false;
-  }
-
-  Serial.println("SD iniciado");
-  return true;
+  noTone(BUZZER_PIN);
 }
 
-// FOTO 
-void capturePhoto()
+// -------------------- SERIAL --------------------
+void logSerial(double cm)
 {
-  unsigned long now = millis();
-
-  // cooldown 
-  if (now - lastPhotoTime < PHOTO_COOLDOWN)
+  if (cm < 0)
   {
-    Serial.println("Cooldown ativo");
-    return;
-  }
-
-  lastPhotoTime = now;
-
-  Serial.println("Capturando foto...");
-
-  camera_fb_t* fb = esp_camera_fb_get();
-
-  if (!fb)
-  {
-    Serial.println("Falha captura");
-    return;
-  }
-
-  String timestamp = getTimestamp();
-
-  String path = "/foto_" + timestamp + ".jpg";
-
-  File file = SD_MMC.open(path.c_str(), FILE_WRITE);
-
-  if (!file)
-  {
-    Serial.println("Erro ao abrir arquivo");
-
-    esp_camera_fb_return(fb);
-    return;
-  }
-
-  file.write(fb->buf, fb->len);
-
-  file.close();
-
-  esp_camera_fb_return(fb);
-
-  Serial.print("Foto salva: ");
-  Serial.println(path);
-}
-
-//  MQTT CALLBACK 
-void mqttCallback(
-  char* topic,
-  byte* payload,
-  unsigned int length
-)
-{
-  Serial.print("Mensagem recebida em: ");
-  Serial.println(topic);
-
-  String message;
-
-  for (unsigned int i = 0; i < length; i++)
-  {
-    message += (char)payload[i];
-  }
-
-  Serial.print("Payload: ");
-  Serial.println(message);
-
-  // qualquer mensagem recebida tira foto
-  capturePhoto();
-}
-
-// MQTT 
-bool connectMQTT()
-{
-  if (mqttClient.connected())
-  {
-    return true;
-  }
-
-  Serial.print("Conectando MQTT... ");
-
-  bool connected = mqttClient.connect(clientId.c_str());
-
-  if (connected)
-  {
-    Serial.println("conectado");
-
-    mqttClient.subscribe(MQTT_TOPIC);
-
-    Serial.print("Inscrito em: ");
-    Serial.println(MQTT_TOPIC);
+    Serial.println("Erro");
   }
   else
   {
-    Serial.print("falhou rc=");
-    Serial.println(mqttClient.state());
-  }
+    Serial.print(cm);
 
-  return connected;
+    Serial.println(" cm");
+  }
 }
 
-// SETUP 
+// -------------------- SETUP --------------------
 void setup()
 {
-  Serial.begin(115200);
+  Serial.begin(9600);
 
-  delay(1000);
+  // IMPORTANTE:
+  // O ESP8266 deve estar configurado em 9600 baud:
+  // AT+UART_DEF=9600,8,1,0,0
+  espSerial.begin(9600);
 
-  connectWiFi();
+  WiFi.init(&espSerial);
 
-  setupTime();
-
-  if (!initCamera())
+  // Verifica comunicação com ESP8266
+  if (WiFi.status() == WL_NO_SHIELD)
   {
-    Serial.println("Falha camera");
-    return;
-  }
+    Serial.println("ESP8266 nao encontrado");
 
-  if (!initSD())
-  {
-    Serial.println("Falha SD");
-    return;
+    while (true);
   }
 
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
 
-  mqttClient.setCallback(mqttCallback);
+  // Ajustes de estabilidade MQTT
+  mqttClient.setKeepAlive(30);
+
+  mqttClient.setSocketTimeout(30);
+
+  pinMode(TRIGGER_PIN, OUTPUT);
+
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  // NRF24 inicializado mas sem uso ativo
+  radio.begin();
+
+  radio.setPALevel(RF24_PA_LOW);
+
+  connectWiFi();
 
   connectMQTT();
 
-  Serial.println("Sistema pronto");
+  delay(1000);
 }
 
-// LOOP 
+// -------------------- LOOP --------------------
 void loop()
 {
+  // Reconexão WiFi
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("WiFi desconectado");
+
+    connectWiFi();
+  }
+
+  // Reconexão MQTT
   if (!mqttClient.connected())
   {
-    unsigned long now = millis();
+    Serial.println("MQTT desconectado");
 
-    if (now - lastReconnectAttempt > 5000)
+    connectMQTT();
+  }
+
+  mqttClient.loop();
+
+  unsigned long now = millis();
+
+  if (now - lastSensorRead >= SENSOR_INTERVAL)
+  {
+    lastSensorRead = now;
+
+    distanceCm = getDistanceCm();
+
+    if (
+      distanceCm > 0 &&
+      distanceCm <= DIST_VERY_NEAR
+    )
     {
-      lastReconnectAttempt = now;
+      if (!veryNearSent)
+      {
+        beepOnce();
 
-      connectMQTT();
+        publishVeryNear(distanceCm);
+
+        veryNearSent = true;
+      }
+    }
+    else
+    {
+      veryNearSent = false;
     }
   }
-  else
-  {
-    mqttClient.loop();
-  }
-
-  delay(10);
 }
