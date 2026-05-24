@@ -1,5 +1,4 @@
 #include <SPI.h>
-#include <RF24.h>
 #include <WiFiEsp.h>
 #include <PubSubClient.h>
 #include <SoftwareSerial.h>
@@ -8,12 +7,6 @@
 const int TRIGGER_PIN = 4;
 const int ECHO_PIN = 5;
 const int BUZZER_PIN = 10;
-
-// -------------------- NRF24 --------------------
-const int CE_PIN = 7;
-const int CSN_PIN = 8;
-
-RF24 radio(CE_PIN, CSN_PIN);
 
 // -------------------- WIFI --------------------
 char SSID[] = "ARYA-DEUSA";
@@ -33,30 +26,25 @@ const char* MQTT_TOPIC =
   "felipe-diniz/projeto/exercito/sensor-distancia";
 
 // -------------------- CONFIGURAÇÕES --------------------
-const int DIST_MAX = 300;
-const int DIST_MED = 200;
-const int DIST_NEAR = 100;
 const int DIST_VERY_NEAR = 20;
-
-// Intervalo aumentado para maior estabilidade
 const unsigned long SENSOR_INTERVAL = 500;
 
 // -------------------- ESTADO --------------------
 double distanceCm = 0;
 
 unsigned long lastSensorRead = 0;
-
 bool veryNearSent = false;
+
+unsigned long lastReconnectWiFi = 0;
+unsigned long lastReconnectMQTT = 0;
 
 // -------------------- ULTRASSÔNICO --------------------
 long readUltrasonic()
 {
   digitalWrite(TRIGGER_PIN, LOW);
-
   delayMicroseconds(2);
 
   digitalWrite(TRIGGER_PIN, HIGH);
-
   delayMicroseconds(10);
 
   digitalWrite(TRIGGER_PIN, LOW);
@@ -69,9 +57,7 @@ double getDistanceCm()
   long duration = readUltrasonic();
 
   if (duration == 0)
-  {
     return -1;
-  }
 
   return duration * 0.01723;
 }
@@ -83,17 +69,12 @@ void connectWiFi()
 
   while (WiFi.status() != WL_CONNECTED)
   {
-    Serial.println("Tentando conectar...");
-
     WiFi.begin(SSID, PASSWORD);
-
-    delay(10000);
+    delay(5000);
+    yield();
   }
 
   Serial.println("WiFi conectado");
-
-  Serial.print("IP: ");
-
   Serial.println(WiFi.localIP());
 }
 
@@ -111,14 +92,14 @@ void connectMQTT()
     else
     {
       Serial.print("Erro MQTT: ");
-
       Serial.println(mqttClient.state());
-
-      delay(3000);
+      delay(2000);
+      yield();
     }
   }
 }
 
+// -------------------- PUBLISH --------------------
 void publishVeryNear(double cm)
 {
   char payload[64];
@@ -132,42 +113,18 @@ void publishVeryNear(double cm)
 
   bool ok = mqttClient.publish(MQTT_TOPIC, payload);
 
-  // Pequeno delay para estabilidade do ESP8266
-  delay(100);
-
   if (ok)
-  {
     Serial.println("Evento MQTT enviado");
-  }
   else
-  {
     Serial.println("Falha ao publicar MQTT");
-  }
 }
 
 // -------------------- BUZZER --------------------
 void beepOnce()
 {
   tone(BUZZER_PIN, 2200);
-
   delay(150);
-
   noTone(BUZZER_PIN);
-}
-
-// -------------------- SERIAL --------------------
-void logSerial(double cm)
-{
-  if (cm < 0)
-  {
-    Serial.println("Erro");
-  }
-  else
-  {
-    Serial.print(cm);
-
-    Serial.println(" cm");
-  }
 }
 
 // -------------------- SETUP --------------------
@@ -175,86 +132,70 @@ void setup()
 {
   Serial.begin(9600);
 
-  // IMPORTANTE:
-  // O ESP8266 deve estar configurado em 9600 baud:
-  // AT+UART_DEF=9600,8,1,0,0
   espSerial.begin(9600);
-
   WiFi.init(&espSerial);
 
-  // Verifica comunicação com ESP8266
   if (WiFi.status() == WL_NO_SHIELD)
   {
     Serial.println("ESP8266 nao encontrado");
-
     while (true);
   }
 
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
-
-  // Ajustes de estabilidade MQTT
   mqttClient.setKeepAlive(30);
-
   mqttClient.setSocketTimeout(30);
 
   pinMode(TRIGGER_PIN, OUTPUT);
-
   pinMode(ECHO_PIN, INPUT);
-
   pinMode(BUZZER_PIN, OUTPUT);
 
-  // NRF24 inicializado mas sem uso ativo
-  radio.begin();
-
-  radio.setPALevel(RF24_PA_LOW);
-
   connectWiFi();
-
   connectMQTT();
-
-  delay(1000);
 }
 
 // -------------------- LOOP --------------------
 void loop()
 {
-  // Reconexão WiFi
+  unsigned long now = millis();
+
+  // ---------------- WiFi reconnect control ----------------
   if (WiFi.status() != WL_CONNECTED)
   {
-    Serial.println("WiFi desconectado");
-
-    connectWiFi();
+    if (now - lastReconnectWiFi > 5000)
+    {
+      Serial.println("WiFi desconectado");
+      connectWiFi();
+      lastReconnectWiFi = now;
+    }
   }
 
-  // Reconexão MQTT
+  // ---------------- MQTT reconnect control ----------------
   if (!mqttClient.connected())
   {
-    Serial.println("MQTT desconectado");
-
-    connectMQTT();
+    if (now - lastReconnectMQTT > 5000)
+    {
+      Serial.println("MQTT desconectado");
+      connectMQTT();
+      lastReconnectMQTT = now;
+    }
   }
 
   mqttClient.loop();
+  yield();
 
-  unsigned long now = millis();
-
+  // ---------------- SENSOR ----------------
   if (now - lastSensorRead >= SENSOR_INTERVAL)
   {
     lastSensorRead = now;
 
     distanceCm = getDistanceCm();
 
-    if (
-      distanceCm > 0 &&
-      distanceCm <= DIST_VERY_NEAR
-    )
+    if (distanceCm > 0 && distanceCm <= DIST_VERY_NEAR)
     {
       if (!veryNearSent)
       {
         beepOnce();
-
         publishVeryNear(distanceCm);
-
         veryNearSent = true;
       }
     }
