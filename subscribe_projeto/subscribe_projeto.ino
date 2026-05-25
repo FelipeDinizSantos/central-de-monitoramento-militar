@@ -5,13 +5,14 @@
 #include "SD_MMC.h"
 #include "time.h"
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 // API LARAVEL URL
 const char* API_URL = "https://laravel-api-production-ebab.up.railway.app/api/registros-acesso";
 
 // WIFI 
-const char* WIFI_SSID = "ARYA-DEUSA";
-const char* WIFI_PASSWORD = "felipeBom123";
+const char* WIFI_SSID = "FelipeDinizTeste";
+const char* WIFI_PASSWORD = "";
 
 // MQTT 
 const char* MQTT_BROKER = "broker.hivemq.com";
@@ -65,6 +66,14 @@ void connectWiFi()
   Serial.println();
   Serial.println("WiFi conectado");
   Serial.println(WiFi.localIP());
+
+  WiFi.config(
+    INADDR_NONE,
+    INADDR_NONE,
+    INADDR_NONE,
+    IPAddress(8,8,8,8),
+    IPAddress(8,8,4,4)
+  );
 }
 
 // Configura data e hora
@@ -146,14 +155,14 @@ bool initCamera()
 
   if (psramFound())
   {
-    config.frame_size = FRAMESIZE_SVGA;
+    config.frame_size = FRAMESIZE_CIF;
     config.jpeg_quality = 10;
     config.fb_count = 1;
   }
   else
   {
-    config.frame_size = FRAMESIZE_SVGA;
-    config.jpeg_quality = 12;
+    config.frame_size = FRAMESIZE_CIF;
+    config.jpeg_quality = 10;
     config.fb_count = 1;
   }
 
@@ -192,36 +201,41 @@ bool initSD()
 // Envia para API Laravel local 
 void sendPhotoToAPI(camera_fb_t* fb)
 {
+  WiFiClientSecure client;
+
+  // Ignora certificado SSL
+  client.setInsecure();
+
   HTTPClient http;
 
-  http.begin(API_URL);
+  Serial.println("Iniciando HTTPS...");
+
+  if (!http.begin(client, API_URL))
+  {
+    Serial.println("Falha no begin HTTPS");
+    return;
+  }
 
   http.addHeader("Content-Type", "image/jpeg");
-
   http.addHeader("device-id", clientId);
-
   http.addHeader("mensagem", "Movimento detectado");
 
   Serial.print("Tamanho imagem: ");
   Serial.println(fb->len);
 
-  Serial.print("Conectado WiFi: ");
-  Serial.println(WiFi.status() == WL_CONNECTED);
+  Serial.print("Heap antes POST: ");
+  Serial.println(ESP.getFreeHeap());
 
-  Serial.print("Gateway: ");
-  Serial.println(WiFi.gatewayIP());
-
-  Serial.print("API URL: ");
-  Serial.println(API_URL);
   int responseCode = http.POST(fb->buf, fb->len);
 
   Serial.print("HTTP Response: ");
   Serial.println(responseCode);
-  
+
   if (responseCode > 0)
   {
     String response = http.getString();
 
+    Serial.println("Resposta API:");
     Serial.println(response);
   }
   else
@@ -231,9 +245,6 @@ void sendPhotoToAPI(camera_fb_t* fb)
   }
 
   http.end();
-
-  Serial.print("ESP IP: ");
-  Serial.println(WiFi.localIP());
 }
 
 // FOTO 
@@ -361,6 +372,23 @@ void setup()
   mqttClient.setCallback(mqttCallback);
 
   connectMQTT();
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  
+  Serial.print("Heap livre: ");
+  Serial.println(ESP.getFreeHeap());
+
+  Serial.println("Testando HTTPS...");
+
+  if (client.connect("google.com", 443))
+  {
+    Serial.println("HTTPS OK");
+  }
+  else
+  {
+    Serial.println("HTTPS FALHOU");
+  }
 
   Serial.println("Sistema pronto");
 }

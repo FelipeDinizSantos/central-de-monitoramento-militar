@@ -9,8 +9,8 @@ const int ECHO_PIN = 5;
 const int BUZZER_PIN = 10;
 
 // -------------------- WIFI --------------------
-char SSID[] = "ARYA-DEUSA";
-char PASSWORD[] = "felipeBom123";
+char SSID[] = "FelipeDinizTeste";
+char PASSWORD[] = "12345678";
 
 // RX, TX
 SoftwareSerial espSerial(2, 3);
@@ -26,7 +26,7 @@ const char* MQTT_TOPIC =
   "felipe-diniz/projeto/exercito/sensor-distancia";
 
 // -------------------- CONFIGURAÇÕES --------------------
-const int DIST_VERY_NEAR = 20;
+const int DIST_VERY_NEAR = 70;
 const unsigned long SENSOR_INTERVAL = 500;
 
 const int REQUIRED_CONFIRMATIONS = 2;
@@ -173,6 +173,15 @@ void publishVeryNear(double cm)
 // -------------------- BUZZER --------------------
 void beepOnce()
 {
+  unsigned long delayStart = millis();
+
+  while (millis() - delayStart < 1000)
+  {
+    mqttClient.loop();
+    yield();
+    delay(10);
+  }
+
   tone(BUZZER_PIN, 2200);
 
   unsigned long start = millis();
@@ -181,6 +190,7 @@ void beepOnce()
   {
     mqttClient.loop();
     yield();
+    delay(5);
   }
 
   noTone(BUZZER_PIN);
@@ -280,9 +290,9 @@ void loop()
         !veryNearSent
       )
       {
-        beepOnce();
-
         publishVeryNear(distanceCm);
+
+        beepOnce();
 
         veryNearSent = true;
       }
